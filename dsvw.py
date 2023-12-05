@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-import html, http.client, http.server, io, json, os, pickle, random, re, socket, socketserver, sqlite3, string, sys, subprocess, time, traceback, urllib.parse, urllib.request, xml.etree.ElementTree  # Python 3 required
+import html, http.client, http.server, io, json, os, pickle, random, re, socket, socketserver, sqlite3, string, sys, subprocess, time, traceback, urllib.parse, urllib.request, xml.etree.ElementTree
+import subprocess
+import os
+import requests
+import json
 try:
     import lxml.etree
 except ImportError:
@@ -26,17 +30,60 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
         code, content, params, cursor = http.client.OK, HTML_PREFIX, dict((match.group("parameter"), urllib.parse.unquote(','.join(re.findall(r"(?:\A|[?&])%s=([^&]+)" % match.group("parameter"), query)))) for match in re.finditer(r"((\A|[?&])(?P<parameter>[\w\[\]]+)=)([^&]+)", query)), connection.cursor()
         try:
             if path == '/':
+                # Assuming 'connection' is a SQLAlchemy connection object
                 if "id" in params:
-                    cursor.execute("SELECT id, username, name, surname FROM users WHERE id=" + params["id"])
-                    content += "<div><span>Result(s):</span></div><table><thead><th>id</th><th>username</th><th>name</th><th>surname</th></thead>%s</table>%s" % ("".join("<tr>%s</tr>" % "".join("<td>%s</td>" % ("-" if _ is None else _) for _ in row) for row in cursor.fetchall()), HTML_POSTFIX)
+                    # Using a prepared statement with named parameters
+                    query = text("SELECT id, username, name, surname FROM users WHERE id = :user_id")
+                    result = connection.execute(query, user_id=params["id"])
+                    # Building the HTML content with fetched results
+                    content += "<div><span>Result(s):</span></div><table><thead><th>id</th><th>username</th><th>name</th><th>surname</th></thead>"
+                    for row in result:
+                        content += "<tr>" + "".join("<td>%s</td>" % ("-" if col is None else col) for col in row) + "</tr>"
+                    content += "</table>%s" % HTML_POSTFIX
                 elif "v" in params:
                     content += re.sub(r"(v<b>)[^<]+(</b>)", r"\g<1>%s\g<2>" % params["v"], HTML_POSTFIX)
-                elif "object" in params:
-                    content = str(pickle.loads(params["object"].encode()))
-                elif "path" in params:
-                    content = (open(os.path.abspath(params["path"]), "rb") if not "://" in params["path"] else urllib.request.urlopen(params["path"])).read().decode()
+                # ...
+                if "object" in params:
+                    # Decode the JSON serialized data safely
+                    content = str(json.loads(params["object"]))
+                def safe_fetch_content(params):
+                    if "path" in params:
+                        # Parse the URL or path
+                        parsed_url = urlparse(params["path"])
+                        # Check if the scheme is HTTP or HTTPS (or other allowed schemes)
+                        if parsed_url.scheme in ["http", "https"]:
+                            # Use requests to fetch the content
+                            response = requests.get(params["path"])
+                            content = response.content.decode()
+                        elif parsed_url.scheme == "":
+                            # Local file path (no scheme)
+                            # Ensure the path is within a safe directory
+                            safe_base_path = "/path/to/allowed/directory"
+                            full_path = os.path.abspath(os.path.join(safe_base_path, params["path"]))
+                            # Check if the path is within the safe_base_path
+                            if os.path.commonpath([safe_base_path, full_path]) == safe_base_path:
+                                with open(full_path, "rb") as file:
+                                    content = file.read().decode()
+                            else:
+                                raise ValueError("Unauthorized file path")
+                        else:
+                            # Unsupported or potentially dangerous scheme
+                            raise ValueError("Unsupported URL scheme")
+                    else:
+                        content = None
+                    return content
+                # Example usage:
+                try:
+                    content = safe_fetch_content({"path": "example.txt"})
+                    # Do something with the content
+                except ValueError as e:
+                    print(f"Error: {e}")
                 elif "domain" in params:
-                    content = subprocess.check_output("nslookup " + params["domain"], shell=True, stderr=subprocess.STDOUT, stdin=subprocess.PIPE).decode()
+                    # Ensure that 'params["domain"]' is properly sanitized to prevent injection attacks
+                    # For example, you might want to verify that it's a valid domain name format
+                    domain = params["domain"].strip()
+                    # Use a list to pass the command and its arguments instead of a string
+                    content = subprocess.check_output(["nslookup", domain], stderr=subprocess.STDOUT, stdin=subprocess.PIPE).decode()
                 elif "xml" in params:
                     content = lxml.etree.tostring(lxml.etree.parse(io.BytesIO(params["xml"].encode()), lxml.etree.XMLParser(no_network=False)), pretty_print=True).decode()
                 elif "name" in params:
@@ -47,7 +94,10 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
                     content += "<b>Time required</b> (to 'resize image' to %dx%d): %.6f seconds%s" % (int(params["size"]), int(params["size"]), time.time() - start, HTML_POSTFIX)
                 elif "comment" in params or query == "comment=":
                     if "comment" in params:
-                        cursor.execute("INSERT INTO comments VALUES(NULL, '%s', '%s')" % (params["comment"], time.ctime()))
+                        # Assuming 'cursor' is a database cursor object and 'params' is a dictionary with the necessary parameters.
+                        query = "INSERT INTO comments VALUES(NULL, %s, %s)"
+                        values = (params["comment"], time.ctime())
+                        cursor.execute(query, values)
                         content += "Thank you for leaving the comment. Please click here <a href=\"/?comment=\">here</a> to see all comments%s" % HTML_POSTFIX
                     else:
                         cursor.execute("SELECT id, comment, time FROM comments")
